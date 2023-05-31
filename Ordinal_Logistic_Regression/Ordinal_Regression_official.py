@@ -22,6 +22,9 @@ import operator
 import pandas as pd
 import seaborn as sn
 import matplotlib.pyplot as plt
+import openturns as ot
+
+ot.Log.Show(ot.Log.NONE)
 numpyro.enable_x64()
 
 assert numpyro.__version__.startswith("0.11.0")
@@ -30,7 +33,7 @@ az.style.use("arviz-darkgrid")
 def Generate_Observational_Data(sample_size):
 
     alpha = [-4, 4]
-    beta = [0.9, 0.5, 1.4, 1.8]
+    beta = [1.2, 0.7, 1.4, 0.9]
   # [Z1, Z2, X, Z2]
     # beta = [1.3, 1.25, 1.4, 1.15]
 
@@ -41,6 +44,33 @@ def Generate_Observational_Data(sample_size):
     μ_true = beta[0] * Z1 + beta[1] * Z2
     p_true = expit(μ_true)
     X = dist.Bernoulli(p_true).sample(random.PRNGKey(numpy.random.randint(100)))
+
+    logit_0 = alpha[0] + (beta[2] * X + beta[3]*Z2) + e
+    logit_1 = alpha[1] + (beta[2] * X + beta[3]*Z2) + e
+    q_0 = expit(logit_0)
+    q_1 = expit(logit_1) #probability of class 1 or 0
+    prob_0 = q_0
+    prob_1 = q_1 - q_0
+    prob_2 = 1 - q_1
+    probs = np.stack((prob_0, prob_1, prob_2), axis=1)
+
+    Y = dist.Categorical(probs=probs).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(1,))[0]
+    data = pd.DataFrame({"Y": Y, 'X': X, "Z1": Z1, "Z2": Z2})
+
+    return data, Y, X, Z1, Z2
+
+def Generate_Experimental_Data(Ne):
+
+    alpha = [-4, 4]
+    beta = [1.2, 0.7, 1.4, 0.9]
+  # [Z1, Z2, X, Z2]
+    # beta = [1.3, 1.25, 1.4, 1.15]
+
+    e = dist.Normal(0, 1).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(sample_size,))
+    Z1 = dist.Normal(0, 15).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(sample_size,))
+    Z2 = dist.Normal(0, 10).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(sample_size,))
+
+    X = dist.Bernoulli(0.5).sample(random.PRNGKey(numpy.random.randint(100)))  #Treatment  randomized controlled trial(RTC)
 
     logit_0 = alpha[0] + (beta[2] * X + beta[3]*Z2) + e
     logit_1 = alpha[1] + (beta[2] * X + beta[3]*Z2) + e
@@ -94,92 +124,61 @@ def var_combinations(data):
 
 
 correct_MB = 0
+correct_IMB = 0
 
-sample_size = 800
-runs = 1
-for p in range(runs):
-    fb_trace = 0
-    num_warmup, num_samples = 1000, 1000
-
-    data, Y, X, Z1, Z2 = Generate_Observational_Data(sample_size)
-    print(data["Y"].value_counts())
-
-    """Take all possible combinations for regression """
-    list_comb = var_combinations(data)
-
-    """Regression for (X,Z1,Z2), (X,Z1), (X,Z2), {X}"""
-    MB_Scores = {}
-    list_of_traces = {}
-
-    for i in range(len(list_comb)):
-        reg_variables = list_comb[i]
-
-        N_classes = 3
-
-        kernel = NUTS(Regression_cases, init_strategy=init_to_value())
-        mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples)
-        mcmc.run(random.PRNGKey(1670940923), X, Z1, Z2, reg_variables, Y)
-        mcmc.print_summary()
-        trace = mcmc.get_samples()
-
-        list_of_traces['trace_{}'.format(reg_variables)] = trace
-
-        Log_likelhood_dict = log_likelihood(Regression_cases, trace, X, Z1, Z2, reg_variables, Y)
-
-        Log_likelhood = sum(sum(Log_likelhood_dict['Y']))
-
-        Marginal_Likelihood = Log_likelhood
-
-        fa_trace = sum(norm(0, 1).logpdf(numpy.array(trace['cutpoints'][:, 0])) +
-                       norm(0, 1).logpdf(numpy.array(trace['cutpoints'][:, 1])))
-
-        fb_trace = 0
-        for k in range(len(reg_variables)):
-            fb_trace = fb_trace + norm(0, 1).logpdf(numpy.array(trace['beta_{}'.format(reg_variables[k])]))
-
-        f_prior = sum(fb_trace)
-
-        MB_Scores[reg_variables] = Log_likelhood + f_prior + fa_trace
-
-    MB_Do = max(MB_Scores.items(), key=operator.itemgetter(1))[0]
-
-    print(MB_Do)
-    print(MB_Scores)
-
-    if MB_Do == (('X', 'Z2')):
-        correct_MB = correct_MB + 1
-print(correct_MB / runs)
-
+sample_size = 500
 Ne = 100
-def Generate_Experimental_Data(Ne):
 
-    alpha = [-4, 4]
-    beta = [0.9, 0.5, 1.4, 1.8]
-  # [Z1, Z2, X, Z2]
-    # beta = [1.3, 1.25, 1.4, 1.15]
+fb_trace = 0
+num_warmup, num_samples = 1000, 1000
 
-    e = dist.Normal(0, 1).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(sample_size,))
-    Z1 = dist.Normal(0, 15).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(sample_size,))
-    Z2 = dist.Normal(0, 10).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(sample_size,))
+data, Y, X, Z1, Z2 = Generate_Observational_Data(sample_size)
+print(data["Y"].value_counts())
 
-    X = dist.Bernoulli(0.5).sample(random.PRNGKey(numpy.random.randint(100)))  #Treatment  randomized controlled trial(RTC)
+"""Take all possible combinations for regression """
+list_comb = var_combinations(data)
 
-    logit_0 = alpha[0] + (beta[2] * X + beta[3]*Z2) + e
-    logit_1 = alpha[1] + (beta[2] * X + beta[3]*Z2) + e
-    q_0 = expit(logit_0)
-    q_1 = expit(logit_1) #probability of class 1 or 0
-    prob_0 = q_0
-    prob_1 = q_1 - q_0
-    prob_2 = 1 - q_1
-    probs = np.stack((prob_0, prob_1, prob_2), axis=1)
+"""Regression for (X,Z1,Z2), (X,Z1), (X,Z2), {X}"""
+MB_Scores = {}
+list_of_traces = {}
 
-    Y = dist.Categorical(probs=probs).sample(random.PRNGKey(numpy.random.randint(100)), sample_shape=(1,))[0]
-    data = pd.DataFrame({"Y": Y, 'X': X, "Z1": Z1, "Z2": Z2})
+for i in range(len(list_comb)):
+    reg_variables = list_comb[i]
 
-    return data, Y, X, Z1, Z2
+    N_classes = 3
 
+    kernel = NUTS(Regression_cases, init_strategy=init_to_sample())
+    mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples)
+    mcmc.run(random.PRNGKey(1670940923), X, Z1, Z2, reg_variables, Y)
+    mcmc.print_summary()
+    trace = mcmc.get_samples()
 
-"""Create a list with every SUBSET of MB calculated before"""
+    list_of_traces['trace_{}'.format(reg_variables)] = trace
+
+    Log_likelhood_dict = log_likelihood(Regression_cases, trace, X, Z1, Z2, reg_variables, Y)
+
+    Log_likelhood = sum(sum(Log_likelhood_dict['Y']))
+
+    Marginal_Likelihood = Log_likelhood
+
+    fa_trace = sum(norm(0, 1).logpdf(numpy.array(trace['cutpoints'][:, 0])) +
+                   norm(0, 1).logpdf(numpy.array(trace['cutpoints'][:, 1])))
+
+    fb_trace = 0
+    for k in range(len(reg_variables)):
+        fb_trace = fb_trace + norm(0, 1).logpdf(numpy.array(trace['beta_{}'.format(reg_variables[k])]))
+
+    f_prior = sum(fb_trace)
+
+    MB_Scores[reg_variables] = Log_likelhood + f_prior + fa_trace
+
+MB_Do = max(MB_Scores.items(), key=operator.itemgetter(1))[0]
+
+print(MB_Do)
+print(MB_Scores)
+
+if MB_Do == (('X', 'Z2')):
+    correct_MB = correct_MB + 1
 
 sample_list = list(MB_Do)
 
@@ -200,7 +199,7 @@ for i in range(len(subset_list)):
 
     N_classes = 3
 
-    kernel = NUTS(Regression_cases, init_strategy=init_to_value())
+    kernel = NUTS(Regression_cases, init_strategy=init_to_sample())
     mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples)
     mcmc.run(random.PRNGKey(1670940923), X, Z1, Z2, reg_variables, Y)
     mcmc.print_summary()
@@ -222,12 +221,9 @@ for i in range(len(subset_list)):
     f_prior = sum(fb_trace)
 
     IMB_flat_prior[reg_variables] = Log_likelhood + f_prior + fa_trace
-print(IMB_flat_prior)
+print("With flat prior:", IMB_flat_prior)
 
 
-import openturns as ot
-
-ot.Log.Show(ot.Log.NONE)
 def calculate_LogPDF_of_trace(trace):
     ot.RandomGenerator.SetSeed(1000)
     sample = ot.Sample.BuildFromPoint(trace) #Convert array to openturns object
@@ -259,5 +255,8 @@ for i in range(len(subset_list)):
         fb_trace = fb_trace + sum(calculate_LogPDF_of_trace(numpy.array(trace['beta_{}'.format(reg_variables[k])])))
 
     IMB_post_prior[reg_variables] = Log_likelhood + fb_trace[0] + fa_trace[0]
-print("With posterior as prior:")
-print(IMB_post_prior)
+if ('X', 'Z2') in IMB_post_prior:
+    if IMB_post_prior[('X', 'Z2')] > IMB_flat_prior[('X', 'Z2')] and IMB_post_prior[('X',)] < IMB_flat_prior[('X',)]:
+        correct_IMB = correct_IMB + 1
+print("With posterior as prior:", IMB_post_prior)
+
